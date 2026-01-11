@@ -24,16 +24,21 @@ def main():
     # See: https://a2a-protocol.org/latest/tutorials/python/3-agent-skills-and-card/
     
     skill = AgentSkill(
-        id="",
-        name="",
-        description="",
-        tags=[],
-        examples=[]
+        id="short-interest-eval",
+        name="Short Interest Retrieval Evaluation",
+        description=(
+            "Orchestrates a purple agent to call client_short.py and evaluates the "
+            "short interest result for a given symbol and settlement date."
+        ),
+        tags=["assessment", "finra", "short-interest"],
+        examples=[
+            '{"participants":{"purple":"http://localhost:9009"},"config":{"symbol":"TSLA","settlement_date":"2024-07-15"}}'
+        ],
     )
 
     agent_card = AgentCard(
-        name="",
-        description="",
+        name="Short Interest Green Agent",
+        description="Evaluates purple-agent short interest lookups via artifact submission.",
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version='1.0.0',
         default_input_modes=['text'],

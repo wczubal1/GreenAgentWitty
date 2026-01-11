@@ -48,7 +48,7 @@ uv run src/server.py
 docker build -t my-agent .
 
 # Run the container
-docker run -p 9009:9009 my-agent
+docker run -p 9009:9009 my-agent --host 0.0.0.0 --port 9009
 ```
 
 ## Testing

@@ -41,6 +41,31 @@ uv sync
 uv run src/server.py
 ```
 
+## Assessment Runner
+
+This repo includes `send_assessment.py` to trigger the green → purple evaluation.
+
+```bash
+export FINRA_CLIENT_ID="..."
+export FINRA_CLIENT_SECRET="..."
+
+python send_assessment.py \
+  --green-url http://127.0.0.1:9009 \
+  --purple-url http://127.0.0.1:9010 \
+  --target-month 5 \
+  --sample-size 10 \
+  --http-timeout 180
+```
+
+## Make Targets
+
+```bash
+make run
+make send
+make docker-build
+make docker-run
+```
+
 ## Running with Docker
 
 ```bash

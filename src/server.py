@@ -32,7 +32,7 @@ def main():
         ),
         tags=["assessment", "finra", "short-interest"],
         examples=[
-            '{"participants":{"purple":"http://localhost:9009"},"config":{"symbol":"TSLA","settlement_date":"2024-07-15"}}'
+            '{"participants":{"purple":"http://localhost:9009"},"config":{"symbols":["AAPL","MSFT","AMZN"],"target_month":1,"random_seed":42}}'
         ],
     )
 

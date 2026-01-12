@@ -1,18 +1,98 @@
 import argparse
 import asyncio
+import csv
 import json
+import random
+import re
+from datetime import datetime
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types import Message, Part, Role, TextPart
 
+DEFAULT_SP500_CSV = (
+    "D:\\Witold\\Documents\\Computing\\LLMAgentsOfficial\\Hackathon3\\SP500symbols.csv"
+)
 
-def _build_payload(args: argparse.Namespace) -> dict[str, object]:
-    config: dict[str, object] = {
-        "symbol": args.symbol,
-        "settlement_date": args.settlement_date,
-    }
+
+def _normalize_windows_path(path_str: str) -> str:
+    match = re.match(r"^[A-Za-z]:[\\\\/]", path_str)
+    if not match:
+        return path_str
+    drive = path_str[0].lower()
+    rest = path_str[2:].replace("\\", "/").lstrip("/")
+    return f"/mnt/{drive}/{rest}"
+
+
+def _load_symbols(path_str: str) -> list[str]:
+    path = Path(_normalize_windows_path(path_str)).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Symbols CSV not found: {path}")
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, None)
+        if not header:
+            return []
+        header_lower = [cell.strip().lower() for cell in header]
+        symbol_index = None
+        for key in ("symbol", "ticker"):
+            if key in header_lower:
+                symbol_index = header_lower.index(key)
+                break
+        rows = [header] if symbol_index is None else []
+        rows.extend(reader)
+
+    symbols: list[str] = []
+    for row in rows:
+        if not row:
+            continue
+        cell = row[0] if symbol_index is None else row[symbol_index]
+        symbol = str(cell).strip().upper()
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def _sample_symbols(
+    symbols: list[str],
+    sample_size: int,
+    seed: int | None,
+) -> list[str]:
+    if sample_size <= 0:
+        raise ValueError("sample-size must be positive")
+    if len(symbols) < sample_size:
+        raise ValueError(
+            f"Not enough symbols ({len(symbols)}) to sample {sample_size} entries"
+        )
+    rng = random.Random(seed)
+    return rng.sample(symbols, sample_size)
+
+
+def _normalize_date(date_str: str) -> str:
+    trimmed = date_str.strip()
+    if re.match(r"^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$", trimmed):
+        parsed = datetime.strptime(trimmed, "%m/%d/%Y")
+        return parsed.strftime("%Y-%m-%d")
+    return trimmed
+
+def _build_payload(
+    args: argparse.Namespace,
+    symbols: list[str] | None,
+) -> dict[str, object]:
+    config: dict[str, object] = {}
+    if args.settlement_date:
+        config["settlement_date"] = args.settlement_date
+    if args.target_month is not None:
+        config["target_month"] = args.target_month
+    if args.random_seed is not None:
+        config["random_seed"] = args.random_seed
+    if symbols:
+        config["symbols"] = symbols
+    else:
+        config["symbol"] = args.symbol
     if args.issue_name:
         config["issue_name"] = args.issue_name
     if args.finra_client_id:
@@ -48,7 +128,7 @@ async def _run(args: argparse.Namespace) -> None:
             ClientConfig(httpx_client=httpx_client, streaming=args.streaming)
         ).create(agent_card)
 
-        payload = _build_payload(args)
+        payload = _build_payload(args, args.symbols_list)
         msg = Message(
             kind="message",
             role=Role.user,
@@ -76,11 +156,35 @@ def main() -> None:
         default="http://127.0.0.1:9010",
         help="Purple agent base URL.",
     )
-    parser.add_argument("--symbol", required=True, help="Symbol to query.")
+    parser.add_argument("--symbol", help="Symbol to query.")
+    parser.add_argument(
+        "--symbols",
+        help="Comma separated list of symbols to evaluate.",
+    )
+    parser.add_argument(
+        "--symbols-csv",
+        default=DEFAULT_SP500_CSV,
+        help="Path to a CSV file containing SP500 symbols.",
+    )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=10,
+        help="How many symbols to sample from the CSV.",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        help="Seed for reproducible sampling.",
+    )
     parser.add_argument(
         "--settlement-date",
-        required=True,
         help="Settlement date (YYYY-MM-DD).",
+    )
+    parser.add_argument(
+        "--target-month",
+        type=int,
+        help="Target month (1-12) for random day selection in 2025.",
     )
     parser.add_argument("--issue-name", help="Issue name filter.")
     parser.add_argument("--finra-client-id", help="FINRA client id.")
@@ -103,6 +207,30 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.settlement_date:
+        args.settlement_date = _normalize_date(args.settlement_date)
+
+    if args.symbol and args.symbols:
+        parser.error("Use --symbol or --symbols, not both.")
+
+    symbols_list: list[str] | None = None
+    if args.symbols:
+        symbols_list = [part.strip().upper() for part in args.symbols.split(",") if part.strip()]
+        if not symbols_list:
+            parser.error("--symbols must include at least one symbol.")
+    elif args.symbol:
+        symbols_list = None
+    else:
+        symbols = _load_symbols(args.symbols_csv)
+        symbols_list = _sample_symbols(symbols, args.sample_size, args.random_seed)
+
+    args.symbols_list = symbols_list
+    if not args.symbols_list and not args.symbol:
+        parser.error("Provide --symbol or symbols via --symbols/--symbols-csv.")
+
+    if not args.settlement_date and args.target_month is None:
+        parser.error("Provide --settlement-date or --target-month.")
+
     asyncio.run(_run(args))
 
 

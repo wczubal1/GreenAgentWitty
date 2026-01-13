@@ -6,6 +6,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
+import os
 from uuid import uuid4
 
 import httpx
@@ -95,10 +96,14 @@ def _build_payload(
         config["symbol"] = args.symbol
     if args.issue_name:
         config["issue_name"] = args.issue_name
-    if args.finra_client_id:
-        config["finra_client_id"] = args.finra_client_id
-    if args.finra_client_secret:
-        config["finra_client_secret"] = args.finra_client_secret
+    finra_client_id = args.finra_client_id or os.environ.get("FINRA_CLIENT_ID")
+    finra_client_secret = args.finra_client_secret or os.environ.get(
+        "FINRA_CLIENT_SECRET"
+    )
+    if finra_client_id:
+        config["finra_client_id"] = finra_client_id
+    if finra_client_secret:
+        config["finra_client_secret"] = finra_client_secret
     if args.timeout is not None:
         config["timeout"] = args.timeout
 

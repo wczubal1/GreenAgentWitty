@@ -57,6 +57,9 @@ python send_assessment.py \
   --http-timeout 180
 ```
 
+Note: the purple agent can optionally use an MCP server for FINRA lookups. If so,
+set `MCP_SERVER_COMMAND` on the purple runtime (see PurpleAgentWitty README).
+
 ## Make Targets
 
 ```bash

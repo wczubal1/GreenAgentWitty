@@ -57,6 +57,9 @@ python send_assessment.py \
   --http-timeout 180
 ```
 
+By default, `send_assessment.py` reads symbols from `SP500symbols.csv` in the repo
+root. Override with `--symbols-csv` or pass `--symbols`.
+
 Note: the purple agent can optionally use an MCP server for FINRA lookups. If so,
 set `MCP_SERVER_COMMAND` on the purple runtime (see PurpleAgentWitty README).
 

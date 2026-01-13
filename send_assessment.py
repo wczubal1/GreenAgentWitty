@@ -13,9 +13,7 @@ import httpx
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types import Message, Part, Role, TextPart
 
-DEFAULT_SP500_CSV = (
-    "D:\\Witold\\Documents\\Computing\\LLMAgentsOfficial\\Hackathon3\\SP500symbols.csv"
-)
+DEFAULT_SP500_CSV = str(Path(__file__).resolve().parent / "SP500symbols.csv")
 
 
 def _normalize_windows_path(path_str: str) -> str:

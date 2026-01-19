@@ -71,6 +71,48 @@ def _parse_date(value: str) -> date | None:
         return None
 
 
+QUESTION_WEEKLY_KEYWORDS = ("weekly", "week", "weeklysummary", "weekly summary")
+QUESTION_SHARE_KEYWORDS = ("share", "shares", "totalweeklysharequantity", "total weekly share")
+QUESTION_SHORT_KEYWORDS = ("short interest", "short position", "current short")
+
+
+def _normalize_question(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_weekly_question(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.lower()
+    return any(key in lowered for key in QUESTION_WEEKLY_KEYWORDS) and any(
+        key in lowered for key in QUESTION_SHARE_KEYWORDS
+    )
+
+
+def _extract_weekly_share(
+    payload: Any,
+    symbol: str,
+    settlement_date: str,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    target_symbol = symbol.upper()
+    for record in _normalize_records(payload):
+        record_symbol = (
+            record.get("issueSymbolIdentifier")
+            or record.get("symbolCode")
+            or record.get("symbol")
+        )
+        if not isinstance(record_symbol, str) or record_symbol.upper() != target_symbol:
+            continue
+        record_date = record.get("weekStartDate") or record.get("summaryStartDate")
+        if not isinstance(record_date, str) or not record_date.startswith(settlement_date):
+            continue
+        return record.get("totalWeeklyShareQuantity"), record
+    return None, None
+
+
 def _pick_requested_date(config: dict[str, Any]) -> tuple[str, str]:
     settlement_date = str(config.get("settlement_date", "")).strip()
     if settlement_date:
@@ -106,7 +148,43 @@ def _coerce_number(value: Any) -> float | None:
 
 def _build_purple_request(config: dict[str, Any]) -> str:
     symbols = _normalize_symbols(config.get("symbols"))
+    question = _normalize_question(config.get("question"))
+    dataset_group = config.get("dataset_group") or config.get("datasetGroup")
+    dataset_name = config.get("dataset_name") or config.get("datasetName")
+    dataset_group_eval = config.get("dataset_group_eval") or config.get("datasetGroupEval")
+    dataset_name_eval = config.get("dataset_name_eval") or config.get("datasetNameEval")
+    explicit_eval = bool(dataset_group_eval or dataset_name_eval)
+    if dataset_group_eval is None:
+        dataset_group_eval = dataset_group
+    if dataset_name_eval is None:
+        dataset_name_eval = dataset_name
+    dataset_name_value = str(dataset_name_eval).strip() if dataset_name_eval else ""
+    is_weekly = "weeklysummary" in dataset_name_value.lower()
+    if not is_weekly and question and _is_weekly_question(question):
+        is_weekly = True
+
     if symbols:
+        expected_response: dict[str, Any] = {
+            "best_symbol": "string",
+            "best_quantity": "number",
+            "results": "array",
+        }
+        notes = (
+            "Run client_short.py for each symbol. Use dataset_group/dataset_name if provided. "
+            "Try multiple dates to find the closest available settlement date and include attempts in the response. "
+            "Return JSON only."
+        )
+        if is_weekly:
+            expected_response = {
+                "best_symbol": "string",
+                "best_quantity": "number (totalWeeklyShareQuantity)",
+                "results": "array",
+            }
+            notes = (
+                "Run client_short.py for each symbol. Use dataset_group/dataset_name if provided. "
+                "For weeklySummary, use totalWeeklyShareQuantity and pick the closest available "
+                "weekStartDate/summaryStartDate; include attempts in the response. Return JSON only."
+            )
         payload: dict[str, Any] = {
             "task": "max_short_interest",
             "client_short_path": CLIENT_SHORT_PATH,
@@ -115,18 +193,31 @@ def _build_purple_request(config: dict[str, Any]) -> str:
                 "settlement_date": "",
             },
             "requested_settlement_date": "",
-            "expected_response": {
-                "best_symbol": "string",
-                "best_quantity": "number",
-                "results": "array",
-            },
-            "notes": (
-                "Run client_short.py for each symbol. Try multiple dates to find the "
-                "closest available settlement date and include attempts in the response. "
-                "Return JSON only."
-            ),
+            "expected_response": expected_response,
+            "notes": notes,
         }
     else:
+        expected_response = {
+            "symbol": "string",
+            "settlement_date": "YYYY-MM-DD",
+            "currentShortPositionQuantity": "number",
+            "record": "object (raw dataset row)",
+        }
+        notes = (
+            "Run client_short.py with dataset_group/dataset_name if provided and return only JSON (no markdown)."
+        )
+        if is_weekly:
+            expected_response = {
+                "symbol": "string",
+                "weekStartDate": "YYYY-MM-DD",
+                "totalWeeklyShareQuantity": "number",
+                "record": "object (raw dataset row)",
+            }
+            notes = (
+                "Run client_short.py with dataset_group/dataset_name if provided. For weeklySummary, "
+                "return totalWeeklyShareQuantity and the closest available weekStartDate/summaryStartDate. "
+                "Return only JSON (no markdown)."
+            )
         payload = {
             "task": "fetch_short_interest",
             "client_short_path": CLIENT_SHORT_PATH,
@@ -135,17 +226,18 @@ def _build_purple_request(config: dict[str, Any]) -> str:
                 "settlement_date": "",
             },
             "requested_settlement_date": "",
-            "expected_response": {
-                "symbol": "string",
-                "settlement_date": "YYYY-MM-DD",
-                "currentShortPositionQuantity": "number",
-                "record": "object (raw dataset row)",
-            },
-            "notes": "Run client_short.py and return only JSON (no markdown).",
+            "expected_response": expected_response,
+            "notes": notes,
         }
     issue_name = str(config.get("issue_name", "")).strip()
     if issue_name and not symbols:
         payload["args"]["issue_name"] = issue_name
+    if question:
+        payload["question"] = question
+    if dataset_group and not explicit_eval:
+        payload["dataset_group"] = str(dataset_group)
+    if dataset_name and not explicit_eval:
+        payload["dataset_name"] = str(dataset_name)
     client_id = config.get("finra_client_id")
     client_secret = config.get("finra_client_secret")
     if client_id:
@@ -156,7 +248,6 @@ def _build_purple_request(config: dict[str, Any]) -> str:
     if timeout is not None:
         payload["timeout"] = timeout
     return json.dumps(payload)
-
 
 def _load_response_json(response_text: str) -> Any:
     candidate = response_text.strip()
@@ -180,17 +271,58 @@ def _extract_quantity(
     payload: Any,
     symbol: str,
     settlement_date: str,
+    is_weekly: bool,
 ) -> tuple[Any | None, dict[str, Any] | None]:
     if isinstance(payload, dict):
-        direct_value = payload.get("currentShortPositionQuantity")
-        record = payload.get("record") if isinstance(payload.get("record"), dict) else None
-        if direct_value is not None:
-            return direct_value, record or payload
-        if record:
-            record_value = record.get("currentShortPositionQuantity")
-            if record_value is not None:
-                return record_value, record
+        if is_weekly:
+            direct_value = payload.get("totalWeeklyShareQuantity")
+            record = payload.get("record") if isinstance(payload.get("record"), dict) else None
+            if direct_value is not None:
+                return direct_value, record or payload
+            if record:
+                record_value = record.get("totalWeeklyShareQuantity")
+                if record_value is not None:
+                    return record_value, record
+        else:
+            direct_value = payload.get("currentShortPositionQuantity")
+            record = payload.get("record") if isinstance(payload.get("record"), dict) else None
+            if direct_value is not None:
+                return direct_value, record or payload
+            if record:
+                record_value = record.get("currentShortPositionQuantity")
+                if record_value is not None:
+                    return record_value, record
+    if is_weekly:
+        return _extract_weekly_share(payload, symbol, settlement_date)
     return _extract_short_position(payload, symbol, settlement_date)
+
+
+def _build_single_result_data(
+    *,
+    status: str,
+    errors: list[str],
+    symbol: str,
+    settlement_date: str,
+    requested_date_reason: str,
+    quantity: Any | None,
+    record: dict[str, Any] | None,
+    purple_response: Any,
+    is_weekly: bool,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "status": status,
+        "errors": errors,
+        "symbol": symbol,
+        "settlement_date": settlement_date,
+        "requested_date_reason": requested_date_reason,
+        "record": record,
+        "purple_response": purple_response,
+    }
+    if is_weekly:
+        data["totalWeeklyShareQuantity"] = quantity
+    else:
+        data["currentShortPositionQuantity"] = quantity
+    return data
 
 
 def _extract_results(payload: Any) -> list[dict[str, Any]]:
@@ -317,11 +449,42 @@ class Agent:
         parsed: Any | None = None
         symbols = _normalize_symbols(request.config.get("symbols"))
         expected_date = requested_date
+        question = _normalize_question(request.config.get("question"))
+        requested_dataset_name = (
+            request.config.get("dataset_name_eval")
+            or request.config.get("datasetNameEval")
+            or request.config.get("dataset_name")
+            or request.config.get("datasetName")
+        )
+        if requested_dataset_name:
+            requested_is_weekly = "weeklysummary" in str(requested_dataset_name).lower()
+        else:
+            requested_is_weekly = _is_weekly_question(question)
+
 
         try:
             parsed = _load_response_json(purple_response)
         except Exception as exc:
             errors.append(f"Failed to parse JSON response: {exc}")
+
+        response_dataset_name = None
+        response_is_weekly = None
+        if isinstance(parsed, dict):
+            response_dataset_name = parsed.get("dataset_name") or parsed.get("datasetName")
+            if response_dataset_name:
+                response_is_weekly = "weeklysummary" in str(response_dataset_name).lower()
+
+        if question or requested_dataset_name:
+            if not response_dataset_name:
+                errors.append("Purple response missing dataset_name.")
+            elif response_is_weekly != requested_is_weekly:
+                expected_dataset = "weeklySummary" if requested_is_weekly else "consolidatedShortInterest"
+                errors.append(
+                    f"Dataset mismatch: expected {expected_dataset}, got {response_dataset_name}."
+                )
+
+        is_weekly = requested_is_weekly if (question or requested_dataset_name) else bool(response_is_weekly)
+        metric_label = "weekly share" if is_weekly else "short interest"
 
         if symbols:
             results = _extract_results(parsed)
@@ -335,7 +498,11 @@ class Agent:
             expected_date_obj = _parse_date(expected_date)
 
             for result in results:
-                symbol_value = result.get("symbol") or result.get("symbolCode")
+                symbol_value = (
+                    result.get("symbol")
+                    or result.get("symbolCode")
+                    or result.get("issueSymbolIdentifier")
+                )
                 symbol_text = str(symbol_value).strip().upper() if symbol_value else ""
                 if not symbol_text:
                     continue
@@ -347,11 +514,20 @@ class Agent:
                         f"{symbol_text}: expected at least {MIN_ATTEMPTS} attempts."
                     )
 
-                chosen_date = (
-                    result.get("chosen_date")
-                    or result.get("settlement_date")
-                    or (result.get("record") or {}).get("settlementDate")
-                )
+                if is_weekly:
+                    chosen_date = (
+                        result.get("chosen_date")
+                        or result.get("weekStartDate")
+                        or result.get("summaryStartDate")
+                        or (result.get("record") or {}).get("weekStartDate")
+                        or (result.get("record") or {}).get("summaryStartDate")
+                    )
+                else:
+                    chosen_date = (
+                        result.get("chosen_date")
+                        or result.get("settlement_date")
+                        or (result.get("record") or {}).get("settlementDate")
+                    )
                 chosen_date_str = str(chosen_date).strip() if chosen_date else ""
                 chosen_date_obj = _parse_date(chosen_date_str) if chosen_date_str else None
 
@@ -367,10 +543,16 @@ class Agent:
                         attempt_date_obj = _parse_date(attempt_date)
                         if not attempt_date_obj:
                             continue
-                        attempt_quantity = _coerce_number(
-                            attempt.get("quantity")
-                            or attempt.get("currentShortPositionQuantity")
-                        )
+                        if is_weekly:
+                            attempt_quantity = _coerce_number(
+                                attempt.get("quantity")
+                                or attempt.get("totalWeeklyShareQuantity")
+                            )
+                        else:
+                            attempt_quantity = _coerce_number(
+                                attempt.get("quantity")
+                                or attempt.get("currentShortPositionQuantity")
+                            )
                         if attempt_quantity is None:
                             continue
                         diff = abs((attempt_date_obj - expected_date_obj).days)
@@ -409,7 +591,11 @@ class Agent:
                 best_quantity = parsed.get("best_quantity") or parsed.get("bestQuantity")
 
             if max_symbol is None or max_quantity is None:
-                errors.append("No numeric short interest values returned.")
+                errors.append(
+                    "No numeric weekly share values returned."
+                    if is_weekly
+                    else "No numeric short interest values returned."
+                )
             else:
                 if best_symbol and str(best_symbol).strip().upper() != max_symbol:
                     errors.append(
@@ -424,7 +610,7 @@ class Agent:
 
             status = "pass" if not errors else "fail"
             summary = (
-                f"Max short interest lookup {status} for {len(symbols)} symbols "
+                f"Max {metric_label} lookup {status} for {len(symbols)} symbols "
                 f"(requested date {expected_date})."
             )
 
@@ -458,19 +644,37 @@ class Agent:
                 parsed,
                 str(request.config.get("symbol", "")).strip(),
                 expected_date,
+                is_weekly,
             )
         except Exception as exc:
             errors.append(f"Failed to parse JSON response: {exc}")
 
         if quantity is None:
-            errors.append("Missing currentShortPositionQuantity for the requested symbol/date.")
+            errors.append(
+                "Missing totalWeeklyShareQuantity for the requested symbol/date."
+                if is_weekly
+                else "Missing currentShortPositionQuantity for the requested symbol/date."
+            )
 
         expected_symbol = str(request.config.get("symbol", "")).strip().upper()
         record_symbol = None
         record_date = None
         if record:
-            record_symbol = record.get("symbolCode") or record.get("symbol")
-            record_date = record.get("settlementDate") or record.get("settlement_date")
+            if is_weekly:
+                record_symbol = (
+                    record.get("issueSymbolIdentifier")
+                    or record.get("symbolCode")
+                    or record.get("symbol")
+                )
+                record_date = (
+                    record.get("weekStartDate")
+                    or record.get("summaryStartDate")
+                    or record.get("settlementDate")
+                    or record.get("settlement_date")
+                )
+            else:
+                record_symbol = record.get("symbolCode") or record.get("symbol")
+                record_date = record.get("settlementDate") or record.get("settlement_date")
         if record_symbol and isinstance(record_symbol, str):
             if record_symbol.upper() != expected_symbol:
                 errors.append(
@@ -479,16 +683,20 @@ class Agent:
         if record_date and isinstance(record_date, str):
             if not record_date.startswith(expected_date):
                 errors.append(
-                    f"Settlement date mismatch: expected {expected_date}, got {record_date}."
+                    f"Date mismatch: expected {expected_date}, got {record_date}."
                 )
 
         if quantity is not None and not isinstance(quantity, (int, float)):
             if _coerce_number(quantity) is None:
-                errors.append("currentShortPositionQuantity is not numeric.")
+                errors.append(
+                    "totalWeeklyShareQuantity is not numeric."
+                    if is_weekly
+                    else "currentShortPositionQuantity is not numeric."
+                )
 
         status = "pass" if not errors else "fail"
         summary = (
-            f"Short interest lookup {status} for {expected_symbol} on {expected_date}."
+            f"{metric_label.title()} lookup {status} for {expected_symbol} on {expected_date}."
         )
 
         await updater.add_artifact(
@@ -496,16 +704,17 @@ class Agent:
                 Part(root=TextPart(text=summary)),
                 Part(
                     root=DataPart(
-                        data={
-                            "status": status,
-                            "errors": errors,
-                            "symbol": expected_symbol,
-                            "settlement_date": expected_date,
-                            "requested_date_reason": requested_reason,
-                            "currentShortPositionQuantity": quantity,
-                            "record": record,
-                            "purple_response": parsed,
-                        }
+                        data=_build_single_result_data(
+                            status=status,
+                            errors=errors,
+                            symbol=expected_symbol,
+                            settlement_date=expected_date,
+                            requested_date_reason=requested_reason,
+                            quantity=quantity,
+                            record=record,
+                            purple_response=parsed,
+                            is_weekly=is_weekly,
+                        )
                     )
                 ),
             ],

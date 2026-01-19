@@ -94,6 +94,10 @@ def _build_payload(
         config["symbol"] = args.symbol
     if args.issue_name:
         config["issue_name"] = args.issue_name
+    if args.question:
+        config["question"] = args.question
+    if args.dataset_name_eval:
+        config["dataset_name_eval"] = args.dataset_name_eval
     finra_client_id = args.finra_client_id or os.environ.get("FINRA_CLIENT_ID")
     finra_client_secret = args.finra_client_secret or os.environ.get(
         "FINRA_CLIENT_SECRET"
@@ -190,6 +194,8 @@ def main() -> None:
         help="Target month (1-12) for random day selection in 2025.",
     )
     parser.add_argument("--issue-name", help="Issue name filter.")
+    parser.add_argument("--question", help="Question to drive dataset selection.")
+    parser.add_argument("--dataset-name-eval", help="Dataset name for evaluation only.")
     parser.add_argument("--finra-client-id", help="FINRA client id.")
     parser.add_argument("--finra-client-secret", help="FINRA client secret.")
     parser.add_argument(

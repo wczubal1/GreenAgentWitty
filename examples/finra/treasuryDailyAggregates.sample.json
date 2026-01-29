@@ -1,0 +1,22 @@
+[
+  {
+    "tradeDate": "2025-01-21",
+    "productCategory": "Nominal Coupons",
+    "yearsToMaturity": "<= 2 years",
+    "benchmark": "On-the-run",
+    "dealerCustomerVolume": 35.9,
+    "dealerCustomerCount": 3183,
+    "atsInterdealerVolume": 45.1,
+    "atsInterdealerCount": 20244
+  },
+  {
+    "tradeDate": "2025-01-21",
+    "productCategory": "Nominal Coupons",
+    "yearsToMaturity": "<= 2 years",
+    "benchmark": "Off-the-run",
+    "dealerCustomerVolume": 22.0,
+    "dealerCustomerCount": 19419,
+    "atsInterdealerVolume": 16.3,
+    "atsInterdealerCount": 14742
+  }
+]

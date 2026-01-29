@@ -1,0 +1,20 @@
+[
+  {
+    "symbolCode": "AAPL",
+    "settlementDate": "2025-05-15",
+    "currentShortPositionQuantity": 105169332,
+    "previousShortPositionQuantity": 108598767,
+    "averageDailyVolumeQuantity": 58066315,
+    "issueName": "Apple Inc. Common Stock",
+    "marketClassCode": "NNM"
+  },
+  {
+    "symbolCode": "MSFT",
+    "settlementDate": "2025-05-15",
+    "currentShortPositionQuantity": 57074580,
+    "previousShortPositionQuantity": 50313676,
+    "averageDailyVolumeQuantity": 24840919,
+    "issueName": "Microsoft Corporation Common Stock",
+    "marketClassCode": "NNM"
+  }
+]

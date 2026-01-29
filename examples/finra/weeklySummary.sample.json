@@ -1,0 +1,26 @@
+[
+  {
+    "issueSymbolIdentifier": "WMT",
+    "issueName": "Walmart Inc.",
+    "weekStartDate": "2025-05-13",
+    "summaryStartDate": "2025-05-13",
+    "tierIdentifier": "T1",
+    "summaryTypeCode": "ATS_W_SMBL",
+    "totalWeeklyShareQuantity": 51027916,
+    "dealerCustomerCount": 19419,
+    "productTypeCode": "NMS",
+    "marketParticipantName": "Example ATS"
+  },
+  {
+    "issueSymbolIdentifier": "BIIB",
+    "issueName": "Biogen Inc.",
+    "weekStartDate": "2025-05-13",
+    "summaryStartDate": "2025-05-13",
+    "tierIdentifier": "T1",
+    "summaryTypeCode": "ATS_W_SMBL",
+    "totalWeeklyShareQuantity": 3339605,
+    "dealerCustomerCount": 3183,
+    "productTypeCode": "NMS",
+    "marketParticipantName": "Example ATS"
+  }
+]

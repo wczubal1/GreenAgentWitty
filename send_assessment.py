@@ -96,6 +96,8 @@ def _build_payload(
         config["issue_name"] = args.issue_name
     if args.question:
         config["question"] = args.question
+    if args.dataset_group_eval:
+        config["dataset_group_eval"] = args.dataset_group_eval
     if args.dataset_name_eval:
         config["dataset_name_eval"] = args.dataset_name_eval
     finra_client_id = args.finra_client_id or os.environ.get("FINRA_CLIENT_ID")
@@ -195,6 +197,7 @@ def main() -> None:
     )
     parser.add_argument("--issue-name", help="Issue name filter.")
     parser.add_argument("--question", help="Question to drive dataset selection.")
+    parser.add_argument("--dataset-group-eval", help="Dataset group for evaluation only.")
     parser.add_argument("--dataset-name-eval", help="Dataset name for evaluation only.")
     parser.add_argument("--finra-client-id", help="FINRA client id.")
     parser.add_argument("--finra-client-secret", help="FINRA client secret.")

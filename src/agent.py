@@ -74,6 +74,7 @@ def _parse_date(value: str) -> date | None:
 QUESTION_WEEKLY_KEYWORDS = ("weekly", "week", "weeklysummary", "weekly summary")
 QUESTION_SHARE_KEYWORDS = ("share", "shares", "totalweeklysharequantity", "total weekly share")
 QUESTION_SHORT_KEYWORDS = ("short interest", "short position", "current short")
+QUESTION_TREASURY_KEYWORDS = ("treasury", "dealer customer volume", "on-the-run")
 
 
 def _normalize_question(value: Any) -> str | None:
@@ -90,6 +91,13 @@ def _is_weekly_question(question: str | None) -> bool:
     return any(key in lowered for key in QUESTION_WEEKLY_KEYWORDS) and any(
         key in lowered for key in QUESTION_SHARE_KEYWORDS
     )
+
+
+def _is_treasury_question(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.lower()
+    return any(key in lowered for key in QUESTION_TREASURY_KEYWORDS)
 
 
 def _extract_weekly_share(
@@ -111,6 +119,21 @@ def _extract_weekly_share(
             continue
         return record.get("totalWeeklyShareQuantity"), record
     return None, None
+
+
+def _extract_treasury_record(
+    payload: Any,
+    trade_date: str,
+) -> dict[str, Any] | None:
+    for record in _normalize_records(payload):
+        record_date = record.get("tradeDate")
+        if not isinstance(record_date, str) or not record_date.startswith(trade_date):
+            continue
+        years = str(record.get("yearsToMaturity") or "").strip()
+        benchmark = str(record.get("benchmark") or "").strip()
+        if years == "<= 2 years" and benchmark.lower() == "on-the-run":
+            return record
+    return None
 
 
 def _pick_requested_date(config: dict[str, Any]) -> tuple[str, str]:
@@ -159,9 +182,34 @@ def _build_purple_request(config: dict[str, Any]) -> str:
     if dataset_name_eval is None:
         dataset_name_eval = dataset_name
     dataset_name_value = str(dataset_name_eval).strip() if dataset_name_eval else ""
-    is_weekly = "weeklysummary" in dataset_name_value.lower()
+    dataset_name_lower = dataset_name_value.lower()
+    is_weekly = "weeklysummary" in dataset_name_lower
+    is_treasury = "treasurydailyaggregates" in dataset_name_lower
     if not is_weekly and question and _is_weekly_question(question):
         is_weekly = True
+    if not is_treasury and question and _is_treasury_question(question):
+        is_treasury = True
+    notes = (
+        "Run the FINRA data API and extract the answer based on the question; this includes "
+        "deciding which FINRA dataset to use. Use MCP tools if available; otherwise run client_short.py. "
+        "Pick the dataset based on the question: "
+        "equity consolidatedShortInterest provides currentShortPositionQuantity for OTC short interest "
+        "submissions across exchanges (rolling year by settlement date). "
+        "equity weeklySummary provides totalWeeklyShareQuantity and weekStartDate/summaryStartDate for "
+        "weekly OTC aggregate trade data. "
+        "fixedIncomeMarket/treasuryDailyAggregates provides daily US Treasury volumes from TRACE; "
+        "select the matching yearsToMaturity bucket (e.g., '> 5 years and <= 7 years') and "
+        "benchmark ('On-the-run' or 'Off-the-run'). "
+        "Data definitions: examples/finra/consolidatedShortInterestDescription.json, "
+        "examples/finra/weeklySummaryDescription.json, "
+        "examples/finra/treasuryDailyAggregatesDescription.json. "
+        "Sample payloads: examples/finra/consolidatedShortInterest.sample.json, "
+        "examples/finra/weeklySummary.sample.json, "
+        "examples/finra/treasuryDailyAggregates.sample.json. "
+        "Use dataset_group/dataset_name if provided. "
+        "For symbol lists, return best_symbol/best_quantity across results. "
+        "Try nearby dates where applicable and include attempts. Return JSON only."
+    )
 
     if symbols:
         expected_response: dict[str, Any] = {
@@ -169,22 +217,12 @@ def _build_purple_request(config: dict[str, Any]) -> str:
             "best_quantity": "number",
             "results": "array",
         }
-        notes = (
-            "Run client_short.py for each symbol. Use dataset_group/dataset_name if provided. "
-            "Try multiple dates to find the closest available settlement date and include attempts in the response. "
-            "Return JSON only."
-        )
         if is_weekly:
             expected_response = {
                 "best_symbol": "string",
                 "best_quantity": "number (totalWeeklyShareQuantity)",
                 "results": "array",
             }
-            notes = (
-                "Run client_short.py for each symbol. Use dataset_group/dataset_name if provided. "
-                "For weeklySummary, use totalWeeklyShareQuantity and pick the closest available "
-                "weekStartDate/summaryStartDate; include attempts in the response. Return JSON only."
-            )
         payload: dict[str, Any] = {
             "task": "max_short_interest",
             "client_short_path": CLIENT_SHORT_PATH,
@@ -197,38 +235,49 @@ def _build_purple_request(config: dict[str, Any]) -> str:
             "notes": notes,
         }
     else:
-        expected_response = {
-            "symbol": "string",
-            "settlement_date": "YYYY-MM-DD",
-            "currentShortPositionQuantity": "number",
-            "record": "object (raw dataset row)",
-        }
-        notes = (
-            "Run client_short.py with dataset_group/dataset_name if provided and return only JSON (no markdown)."
-        )
-        if is_weekly:
+        if is_treasury:
             expected_response = {
-                "symbol": "string",
-                "weekStartDate": "YYYY-MM-DD",
-                "totalWeeklyShareQuantity": "number",
+                "tradeDate": "YYYY-MM-DD",
+                "dealerCustomerVolume": "number",
+                "yearsToMaturity": "<= 2 years",
+                "benchmark": "On-the-run",
                 "record": "object (raw dataset row)",
             }
-            notes = (
-                "Run client_short.py with dataset_group/dataset_name if provided. For weeklySummary, "
-                "return totalWeeklyShareQuantity and the closest available weekStartDate/summaryStartDate. "
-                "Return only JSON (no markdown)."
-            )
-        payload = {
-            "task": "fetch_short_interest",
-            "client_short_path": CLIENT_SHORT_PATH,
-            "args": {
-                "symbol": str(config.get("symbol", "")).strip(),
-                "settlement_date": "",
-            },
-            "requested_settlement_date": "",
-            "expected_response": expected_response,
-            "notes": notes,
-        }
+            payload = {
+                "task": "treasury_daily_aggregate",
+                "client_short_path": CLIENT_SHORT_PATH,
+                "args": {
+                    "trade_date": "",
+                },
+                "requested_settlement_date": "",
+                "expected_response": expected_response,
+                "notes": notes,
+            }
+        else:
+            expected_response = {
+                "symbol": "string",
+                "settlement_date": "YYYY-MM-DD",
+                "currentShortPositionQuantity": "number",
+                "record": "object (raw dataset row)",
+            }
+            if is_weekly:
+                expected_response = {
+                    "symbol": "string",
+                    "weekStartDate": "YYYY-MM-DD",
+                    "totalWeeklyShareQuantity": "number",
+                    "record": "object (raw dataset row)",
+                }
+            payload = {
+                "task": "fetch_short_interest",
+                "client_short_path": CLIENT_SHORT_PATH,
+                "args": {
+                    "symbol": str(config.get("symbol", "")).strip(),
+                    "settlement_date": "",
+                },
+                "requested_settlement_date": "",
+                "expected_response": expected_response,
+                "notes": notes,
+            }
     issue_name = str(config.get("issue_name", "")).strip()
     if issue_name and not symbols:
         payload["args"]["issue_name"] = issue_name
@@ -368,9 +417,22 @@ class Agent:
 
         symbols = _normalize_symbols(request.config.get("symbols"))
         symbol = str(request.config.get("symbol", "")).strip()
+        question = _normalize_question(request.config.get("question"))
+        dataset_name_eval = (
+            request.config.get("dataset_name_eval")
+            or request.config.get("datasetNameEval")
+            or request.config.get("dataset_name")
+            or request.config.get("datasetName")
+        )
+        is_treasury = bool(
+            dataset_name_eval
+            and "treasurydailyaggregates" in str(dataset_name_eval).lower()
+        )
+        if not is_treasury and _is_treasury_question(question):
+            is_treasury = True
         if symbols and symbol:
             return False, "Provide either symbol or symbols, not both."
-        if not symbols and not symbol:
+        if not symbols and not symbol and not is_treasury:
             return False, "Provide symbol or symbols in config."
 
         # Add additional request validation here
@@ -427,7 +489,10 @@ class Agent:
         request_payload = _build_purple_request(request.config)
         request_payload_obj = json.loads(request_payload)
         request_payload_obj["requested_settlement_date"] = requested_date
-        request_payload_obj["args"]["settlement_date"] = requested_date
+        if "trade_date" in request_payload_obj.get("args", {}):
+            request_payload_obj["args"]["trade_date"] = requested_date
+        else:
+            request_payload_obj["args"]["settlement_date"] = requested_date
         if "min_attempts" not in request_payload_obj:
             request_payload_obj["min_attempts"] = MIN_ATTEMPTS
         request_payload = json.dumps(request_payload_obj)
@@ -450,16 +515,30 @@ class Agent:
         symbols = _normalize_symbols(request.config.get("symbols"))
         expected_date = requested_date
         question = _normalize_question(request.config.get("question"))
+        requested_dataset_group = (
+            request.config.get("dataset_group_eval")
+            or request.config.get("datasetGroupEval")
+            or request.config.get("dataset_group")
+            or request.config.get("datasetGroup")
+        )
         requested_dataset_name = (
             request.config.get("dataset_name_eval")
             or request.config.get("datasetNameEval")
             or request.config.get("dataset_name")
             or request.config.get("datasetName")
         )
+        requested_dataset_name_value = (
+            str(requested_dataset_name).strip() if requested_dataset_name else ""
+        )
+        requested_is_treasury = "treasurydailyaggregates" in requested_dataset_name_value.lower()
+        if not requested_is_treasury and _is_treasury_question(question):
+            requested_is_treasury = True
         if requested_dataset_name:
-            requested_is_weekly = "weeklysummary" in str(requested_dataset_name).lower()
+            requested_is_weekly = "weeklysummary" in requested_dataset_name_value.lower()
         else:
             requested_is_weekly = _is_weekly_question(question)
+        if requested_is_treasury:
+            requested_is_weekly = False
 
 
         try:
@@ -468,23 +547,104 @@ class Agent:
             errors.append(f"Failed to parse JSON response: {exc}")
 
         response_dataset_name = None
+        response_dataset_group = None
         response_is_weekly = None
         if isinstance(parsed, dict):
             response_dataset_name = parsed.get("dataset_name") or parsed.get("datasetName")
+            response_dataset_group = parsed.get("dataset_group") or parsed.get("datasetGroup")
             if response_dataset_name:
                 response_is_weekly = "weeklysummary" in str(response_dataset_name).lower()
 
-        if question or requested_dataset_name:
+        if question or requested_dataset_name or requested_dataset_group:
             if not response_dataset_name:
                 errors.append("Purple response missing dataset_name.")
-            elif response_is_weekly != requested_is_weekly:
-                expected_dataset = "weeklySummary" if requested_is_weekly else "consolidatedShortInterest"
-                errors.append(
-                    f"Dataset mismatch: expected {expected_dataset}, got {response_dataset_name}."
-                )
+            else:
+                if requested_is_treasury:
+                    expected_dataset = "treasuryDailyAggregates"
+                else:
+                    expected_dataset = (
+                        "weeklySummary" if requested_is_weekly else "consolidatedShortInterest"
+                    )
+                if str(response_dataset_name).lower() != expected_dataset.lower():
+                    errors.append(
+                        f"Dataset mismatch: expected {expected_dataset}, got {response_dataset_name}."
+                    )
+            if requested_dataset_group:
+                if not response_dataset_group:
+                    errors.append("Purple response missing dataset_group.")
+                elif str(response_dataset_group).lower() != str(requested_dataset_group).lower():
+                    errors.append(
+                        f"Dataset group mismatch: expected {requested_dataset_group}, got {response_dataset_group}."
+                    )
 
-        is_weekly = requested_is_weekly if (question or requested_dataset_name) else bool(response_is_weekly)
-        metric_label = "weekly share" if is_weekly else "short interest"
+        is_treasury = requested_is_treasury
+        is_weekly = (
+            requested_is_weekly if (question or requested_dataset_name) else bool(response_is_weekly)
+        )
+        metric_label = (
+            "dealer customer volume"
+            if is_treasury
+            else ("weekly share" if is_weekly else "short interest")
+        )
+
+        if is_treasury:
+            record = None
+            if isinstance(parsed, dict):
+                record = parsed.get("record")
+            if record is None:
+                record = _extract_treasury_record(parsed, expected_date)
+            volume = None
+            if isinstance(parsed, dict):
+                volume = parsed.get("dealerCustomerVolume")
+            if volume is None and record:
+                volume = record.get("dealerCustomerVolume")
+
+            if record is None:
+                errors.append("Missing treasury record for the requested trade date.")
+            else:
+                record_date = record.get("tradeDate")
+                if not isinstance(record_date, str) or not record_date.startswith(expected_date):
+                    errors.append(
+                        f"Trade date mismatch: expected {expected_date}, got {record_date}."
+                    )
+                years = str(record.get("yearsToMaturity") or "").strip()
+                if years != "<= 2 years":
+                    errors.append(
+                        f"yearsToMaturity mismatch: expected '<= 2 years', got {years}."
+                    )
+                benchmark = str(record.get("benchmark") or "").strip()
+                if benchmark.lower() != "on-the-run":
+                    errors.append(
+                        f"benchmark mismatch: expected 'On-the-run', got {benchmark}."
+                    )
+
+            if volume is None or _coerce_number(volume) is None:
+                errors.append("Missing dealerCustomerVolume for the requested trade date.")
+
+            status = "pass" if not errors else "fail"
+            summary = (
+                f"Treasury dealer customer volume {status} for trade date {expected_date}."
+            )
+
+            await updater.add_artifact(
+                parts=[
+                    Part(root=TextPart(text=summary)),
+                    Part(
+                        root=DataPart(
+                            data={
+                                "status": status,
+                                "errors": errors,
+                                "trade_date": expected_date,
+                                "dealerCustomerVolume": _coerce_number(volume),
+                                "record": record,
+                                "purple_response": parsed,
+                            }
+                        )
+                    ),
+                ],
+                name="Result",
+            )
+            return
 
         if symbols:
             results = _extract_results(parsed)

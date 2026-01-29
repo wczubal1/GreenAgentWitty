@@ -63,6 +63,71 @@ root. Override with `--symbols-csv` or pass `--symbols`.
 Note: the purple agent can optionally use an MCP server for FINRA lookups. If so,
 set `MCP_SERVER_COMMAND` on the purple runtime (see PurpleAgentWitty README).
 
+## Evaluation
+
+Each case is evaluated by the green agent and returns `pass` or `fail`.
+
+Checks performed per case:
+- **Dataset selection:** if `question` or `dataset_name_eval` is provided, the purple
+  response must include `dataset_name` and it must match the expected dataset
+  (`consolidatedShortInterest` vs `weeklySummary` vs `treasuryDailyAggregates`).
+- **Results present:** for multi-symbol cases, a `results` list must be returned and
+  cover every requested symbol.
+- **Attempts count:** each symbol must have at least `MIN_ATTEMPTS` attempts.
+- **Closest date:** the chosen date must be the closest available date to the
+  requested date (based on attempted dates).
+- **Numeric metric:** short-interest cases require `currentShortPositionQuantity`,
+  weekly cases require `totalWeeklyShareQuantity`, treasury cases require
+  `dealerCustomerVolume`.
+- **Best symbol/quantity:** the reported best symbol/quantity must match the max
+  computed from the valid attempts.
+
+Dataset guidance:
+- **Equity consolidatedShortInterest:** OTC short interest submissions across exchanges.
+  Use `currentShortPositionQuantity` (current cycle) and settlement dates.
+- **Equity weeklySummary:** weekly OTC aggregate trade data with `totalWeeklyShareQuantity`
+  and `weekStartDate`/`summaryStartDate`.
+- **Fixed income treasuryDailyAggregates:** TRACE daily US Treasury volume. Select the
+  matching `yearsToMaturity` bucket (e.g., `<= 2 years`, `> 5 years and <= 7 years`)
+  and `benchmark` (`On-the-run` or `Off-the-run`) and return `dealerCustomerVolume`.
+
+Scoring:
+- Each case is marked `pass` if no errors are found, otherwise `fail`.
+- Leaderboard runs count `passed` vs `total` and report overall `pass` only when
+  all cases pass.
+
+## Evaluation Internals
+
+Evaluation happens in `/home/wczubal1/projects/GreenAgentWitty/src/agent.py` and
+follows these steps:
+
+- **Normalize config:** `_normalize_question`, `_normalize_symbols`, `_is_weekly_question`,
+  `_is_treasury_question` to infer dataset intent when not explicitly provided.
+- **Build purple request:** `_build_purple_request` assembles the request payload,
+  including dataset expectations and response shape.
+- **Parse purple response:** `_load_response_json` parses the JSON response and
+  dataset selection is validated against `dataset_name_eval`/`dataset_group_eval`
+  (or question-based inference).
+- **Multi-symbol checks:** `_extract_results` ensures all symbols are present,
+  `MIN_ATTEMPTS` are met, the chosen date is the closest to the requested date,
+  and `best_symbol`/`best_quantity` match the computed max from valid attempts.
+- **Single-symbol checks:** `_extract_quantity` validates symbol/date alignment and
+  required metrics (`currentShortPositionQuantity` or `totalWeeklyShareQuantity`).
+- **Treasury checks:** `_extract_treasury_record` finds the row for the requested
+  trade date and verifies `yearsToMaturity`, `benchmark`, and `dealerCustomerVolume`.
+
+## Examples
+
+Sample payloads (returned data shapes):
+- `examples/finra/consolidatedShortInterest.sample.json`
+- `examples/finra/weeklySummary.sample.json`
+- `examples/finra/treasuryDailyAggregates.sample.json`
+
+Dataset descriptions:
+- `examples/finra/consolidatedShortInterestDescription.json`
+- `examples/finra/weeklySummaryDescription.json`
+- `examples/finra/treasuryDailyAggregatesDescription.json`
+
 ## Make Targets
 
 ```bash

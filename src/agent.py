@@ -699,6 +699,23 @@ class Agent:
         except Exception as exc:
             errors.append(f"Failed to parse JSON response: {exc}")
 
+        if (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("treasury_daily_aggregate"), dict)
+        ):
+            treasury_payload = parsed["treasury_daily_aggregate"]
+            outer_dataset_name = parsed.get("dataset_name") or parsed.get("datasetName")
+            outer_dataset_group = parsed.get("dataset_group") or parsed.get("datasetGroup")
+            if outer_dataset_name and not (
+                treasury_payload.get("dataset_name") or treasury_payload.get("datasetName")
+            ):
+                treasury_payload["dataset_name"] = outer_dataset_name
+            if outer_dataset_group and not (
+                treasury_payload.get("dataset_group") or treasury_payload.get("datasetGroup")
+            ):
+                treasury_payload["dataset_group"] = outer_dataset_group
+            parsed = treasury_payload
+
         response_dataset_name = None
         response_dataset_group = None
         response_is_weekly = None

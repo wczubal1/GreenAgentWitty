@@ -1,6 +1,7 @@
 from typing import Any
+import re
 import calendar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import random
 import json
 from pydantic import BaseModel, HttpUrl, ValidationError
@@ -75,6 +76,13 @@ QUESTION_WEEKLY_KEYWORDS = ("weekly", "week", "weeklysummary", "weekly summary")
 QUESTION_SHARE_KEYWORDS = ("share", "shares", "totalweeklysharequantity", "total weekly share")
 QUESTION_SHORT_KEYWORDS = ("short interest", "short position", "current short")
 QUESTION_TREASURY_KEYWORDS = ("treasury", "dealer customer volume", "on-the-run")
+TREASURY_UPPER_BOUND_BUCKETS = {
+    2: "<= 2 years",
+    3: "> 2 years and <= 3 years",
+    5: "> 3 years and <= 5 years",
+    7: "> 5 years and <= 7 years",
+    10: "> 7 years and <= 10 years",
+}
 
 
 def _normalize_question(value: Any) -> str | None:
@@ -98,6 +106,108 @@ def _is_treasury_question(question: str | None) -> bool:
         return False
     lowered = question.lower()
     return any(key in lowered for key in QUESTION_TREASURY_KEYWORDS)
+
+
+def _is_treasury_max_question(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.lower()
+    return ("highest" in lowered or "max" in lowered) and "dealer customer volume" in lowered
+
+
+def _is_treasury_delta_question(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.lower()
+    return "dealer customer volume" in lowered and (
+        "last year" in lowered
+        or "over the last year" in lowered
+        or "year over year" in lowered
+        or "year-over-year" in lowered
+        or "yoy" in lowered
+    )
+
+
+def _has_treasury_bucket(question: str | None) -> bool:
+    if not question:
+        return False
+    lowered = question.lower()
+    if re.search(r">\\s*\\d+\\s*years\\s*and\\s*<=\\s*\\d+\\s*years", lowered):
+        return True
+    if re.search(r"(?:<=|up to)\\s*\\d+\\s*years", lowered):
+        return True
+    return False
+
+
+def _parse_treasury_bucket(question: str | None) -> tuple[str, str]:
+    if not question:
+        return "<= 2 years", "On-the-run"
+    lowered = question.lower()
+    benchmark = "On-the-run"
+    if "off-the-run" in lowered or "off the run" in lowered:
+        benchmark = "Off-the-run"
+    elif "on-the-run" in lowered or "on the run" in lowered:
+        benchmark = "On-the-run"
+
+    explicit = re.search(r">\\s*\\d+\\s*years\\s*and\\s*<=\\s*\\d+\\s*years", lowered)
+    if explicit:
+        return explicit.group(0).replace("  ", " "), benchmark
+    bound_match = re.search(r"(?:<=|up to)\\s*(\\d+)\\s*years", lowered)
+    if bound_match:
+        bound = int(bound_match.group(1))
+        bucket = TREASURY_UPPER_BOUND_BUCKETS.get(bound)
+        if bucket:
+            return bucket, benchmark
+        return f"<= {bound} years", benchmark
+    return "<= 2 years", benchmark
+
+
+def _shift_year(value: str, years: int) -> str | None:
+    parsed = _parse_date(value)
+    if not parsed:
+        return None
+    try:
+        return parsed.replace(year=parsed.year + years).strftime("%Y-%m-%d")
+    except ValueError:
+        adjusted = parsed - timedelta(days=1)
+        return adjusted.replace(year=adjusted.year + years).strftime("%Y-%m-%d")
+
+
+def _extract_attempts(payload: dict[str, Any], key: str | None) -> list[dict[str, Any]]:
+    attempts = payload.get("attempts")
+    if isinstance(attempts, dict) and key:
+        value = attempts.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+    if isinstance(attempts, list) and key is None:
+        return [item for item in attempts if isinstance(item, dict)]
+    return []
+
+
+def _closest_attempt_date(
+    target_date: str,
+    attempts: list[dict[str, Any]],
+) -> str | None:
+    target = _parse_date(target_date)
+    if not target:
+        return None
+    closest = None
+    closest_delta = None
+    for attempt in attempts:
+        attempt_date = attempt.get("tradeDate") or attempt.get("date")
+        if not isinstance(attempt_date, str):
+            continue
+        if not _coerce_bool(attempt.get("has_data")):
+            continue
+        parsed = _parse_date(attempt_date)
+        if not parsed:
+            continue
+        delta = abs((parsed - target).days)
+        if closest_delta is None or delta < closest_delta:
+            closest_delta = delta
+            closest = attempt_date
+    return closest
 
 
 def _extract_weekly_share(
@@ -124,14 +234,16 @@ def _extract_weekly_share(
 def _extract_treasury_record(
     payload: Any,
     trade_date: str,
+    years_to_maturity: str,
+    benchmark: str,
 ) -> dict[str, Any] | None:
     for record in _normalize_records(payload):
         record_date = record.get("tradeDate")
         if not isinstance(record_date, str) or not record_date.startswith(trade_date):
             continue
         years = str(record.get("yearsToMaturity") or "").strip()
-        benchmark = str(record.get("benchmark") or "").strip()
-        if years == "<= 2 years" and benchmark.lower() == "on-the-run":
+        record_benchmark = str(record.get("benchmark") or "").strip()
+        if years == years_to_maturity and record_benchmark.lower() == benchmark.lower():
             return record
     return None
 
@@ -167,6 +279,16 @@ def _coerce_number(value: Any) -> float | None:
         return float(str(value))
     except (TypeError, ValueError):
         return None
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "t"}
+    return False
 
 
 def _build_purple_request(config: dict[str, Any]) -> str:
@@ -208,6 +330,10 @@ def _build_purple_request(config: dict[str, Any]) -> str:
         "examples/finra/treasuryDailyAggregates.sample.json. "
         "Use dataset_group/dataset_name if provided. "
         "For symbol lists, return best_symbol/best_quantity across results. "
+        "For Treasury max-volume questions, return best_years_to_maturity, "
+        "best_dealer_customer_volume, and a candidates list of rows considered. "
+        "If a trade date is a weekend/holiday, use the closest available tradeDate "
+        "and include attempts with has_data flags. "
         "Try nearby dates where applicable and include attempts. Return JSON only."
     )
 
@@ -236,13 +362,40 @@ def _build_purple_request(config: dict[str, Any]) -> str:
         }
     else:
         if is_treasury:
-            expected_response = {
-                "tradeDate": "YYYY-MM-DD",
-                "dealerCustomerVolume": "number",
-                "yearsToMaturity": "<= 2 years",
-                "benchmark": "On-the-run",
-                "record": "object (raw dataset row)",
-            }
+            is_treasury_delta = bool(question and _is_treasury_delta_question(question))
+            is_treasury_max = bool(question and _is_treasury_max_question(question))
+            if is_treasury_delta:
+                expected_response = {
+                    "tradeDate": "YYYY-MM-DD",
+                    "previous_trade_date": "YYYY-MM-DD",
+                    "benchmark": "On-the-run|Off-the-run",
+                    "best_years_to_maturity": "yearsToMaturity bucket string",
+                    "best_dealer_customer_volume_delta": "number",
+                    "record_current": "object (best row)",
+                    "record_previous": "object (best row)",
+                    "candidates_current": "array (rows considered)",
+                    "candidates_previous": "array (rows considered)",
+                    "attempts": "object (current/previous attempts)",
+                }
+            elif is_treasury_max:
+                expected_response = {
+                    "tradeDate": "YYYY-MM-DD",
+                    "benchmark": "On-the-run|Off-the-run",
+                    "best_years_to_maturity": "yearsToMaturity bucket string",
+                    "best_dealer_customer_volume": "number",
+                    "record": "object (best row)",
+                    "candidates": "array (rows considered)",
+                    "attempts": "array (date attempts)",
+                }
+            else:
+                expected_response = {
+                    "tradeDate": "YYYY-MM-DD",
+                    "dealerCustomerVolume": "number",
+                    "yearsToMaturity": "<= 2 years",
+                    "benchmark": "On-the-run",
+                    "record": "object (raw dataset row)",
+                    "attempts": "array (date attempts)",
+                }
             payload = {
                 "task": "treasury_daily_aggregate",
                 "client_short_path": CLIENT_SHORT_PATH,
@@ -588,11 +741,334 @@ class Agent:
         )
 
         if is_treasury:
+            is_delta = _is_treasury_delta_question(question)
+            is_max = _is_treasury_max_question(question) and not is_delta
+            bucket_explicit = _has_treasury_bucket(question)
+            expected_years, expected_benchmark = _parse_treasury_bucket(question)
+            record = None
+            if isinstance(parsed, dict):
+                record = parsed.get("record")
+
+            if is_delta:
+                if not isinstance(parsed, dict):
+                    errors.append("Purple response missing JSON object for treasury delta.")
+                attempts_current = (
+                    _extract_attempts(parsed, "current") if isinstance(parsed, dict) else []
+                )
+                attempts_previous = (
+                    _extract_attempts(parsed, "previous") if isinstance(parsed, dict) else []
+                )
+                expected_previous_date = _shift_year(expected_date, -1) or ""
+                resolved_current_date = (
+                    parsed.get("tradeDate") if isinstance(parsed, dict) else None
+                )
+                resolved_previous_date = (
+                    parsed.get("previous_trade_date")
+                    if isinstance(parsed, dict)
+                    else None
+                )
+                closest_current = (
+                    _closest_attempt_date(expected_date, attempts_current)
+                    if attempts_current
+                    else None
+                )
+                closest_previous = (
+                    _closest_attempt_date(expected_previous_date, attempts_previous)
+                    if attempts_previous
+                    else None
+                )
+                if closest_current and resolved_current_date != closest_current:
+                    errors.append(
+                        "Current trade date is not the closest available date."
+                    )
+                if closest_previous and resolved_previous_date != closest_previous:
+                    errors.append(
+                        "Previous trade date is not the closest available date."
+                    )
+
+                candidates_current = (
+                    _normalize_records(parsed.get("candidates_current"))
+                    if isinstance(parsed, dict)
+                    else []
+                )
+                candidates_previous = (
+                    _normalize_records(parsed.get("candidates_previous"))
+                    if isinstance(parsed, dict)
+                    else []
+                )
+                if not candidates_current or not candidates_previous:
+                    errors.append("Treasury candidates missing for delta evaluation.")
+
+                def _bucket_map(records: list[dict[str, Any]]) -> dict[str, float]:
+                    buckets: dict[str, float] = {}
+                    for item in records:
+                        benchmark = str(item.get("benchmark") or "").strip()
+                        if benchmark.lower() != expected_benchmark.lower():
+                            continue
+                        years = str(item.get("yearsToMaturity") or "").strip()
+                        if bucket_explicit and years != expected_years:
+                            continue
+                        volume = _coerce_number(item.get("dealerCustomerVolume"))
+                        if volume is None:
+                            continue
+                        current = buckets.get(years)
+                        if current is None or volume > current:
+                            buckets[years] = volume
+                    return buckets
+
+                current_map = _bucket_map(candidates_current)
+                previous_map = _bucket_map(candidates_previous)
+                shared = {key for key in current_map if key in previous_map}
+                if not shared:
+                    errors.append("No overlapping maturity buckets for delta evaluation.")
+
+                expected_best_years = ""
+                expected_delta = None
+                if shared:
+                    expected_best_years = max(
+                        shared, key=lambda key: current_map[key] - previous_map[key]
+                    )
+                    expected_delta = current_map[expected_best_years] - previous_map[
+                        expected_best_years
+                    ]
+
+                response_best_years = str(
+                    parsed.get("best_years_to_maturity")
+                    or parsed.get("bestYearsToMaturity")
+                    or ""
+                ).strip() if isinstance(parsed, dict) else ""
+                response_delta = (
+                    _coerce_number(
+                        parsed.get("best_dealer_customer_volume_delta")
+                        or parsed.get("bestDealerCustomerVolumeDelta")
+                    )
+                    if isinstance(parsed, dict)
+                    else None
+                )
+                if expected_best_years and response_best_years != expected_best_years:
+                    errors.append(
+                        "Best yearsToMaturity mismatch: "
+                        f"expected '{expected_best_years}', got {response_best_years}."
+                    )
+                if expected_delta is not None and response_delta is not None:
+                    if abs(response_delta - expected_delta) > 1e-6:
+                        errors.append(
+                            "Best dealerCustomerVolume delta mismatch: "
+                            f"expected {expected_delta}, got {response_delta}."
+                        )
+                if response_best_years == "":
+                    errors.append("Missing best_years_to_maturity for delta question.")
+                if response_delta is None:
+                    errors.append(
+                        "Missing best_dealer_customer_volume_delta for delta question."
+                    )
+
+                record_current = (
+                    parsed.get("record_current") if isinstance(parsed, dict) else None
+                )
+                record_previous = (
+                    parsed.get("record_previous") if isinstance(parsed, dict) else None
+                )
+
+                status = "pass" if not errors else "fail"
+                summary = (
+                    "Treasury dealer customer volume delta "
+                    f"{status} for trade date {expected_date}."
+                )
+                await updater.add_artifact(
+                    parts=[
+                        Part(root=TextPart(text=summary)),
+                        Part(
+                            root=DataPart(
+                                data={
+                                    "status": status,
+                                    "errors": errors,
+                                    "trade_date": expected_date,
+                                    "previous_trade_date": expected_previous_date,
+                                    "best_years_to_maturity": response_best_years,
+                                    "best_dealer_customer_volume_delta": response_delta,
+                                    "record_current": record_current,
+                                    "record_previous": record_previous,
+                                    "candidates_current": candidates_current,
+                                    "candidates_previous": candidates_previous,
+                                    "purple_response": parsed,
+                                }
+                            )
+                        ),
+                    ],
+                    name="Result",
+                )
+                return
+
+            if is_max:
+                candidates: list[dict[str, Any]] = []
+                if isinstance(parsed, dict):
+                    candidate_payload = (
+                        parsed.get("candidates")
+                        or parsed.get("records")
+                        or parsed.get("rows")
+                        or parsed.get("data")
+                        or parsed.get("results")
+                    )
+                    candidates = _normalize_records(candidate_payload)
+                if not candidates:
+                    errors.append("Purple response missing treasury candidates list.")
+
+                matching: list[dict[str, Any]] = []
+                for candidate in candidates:
+                    candidate_date = candidate.get("tradeDate")
+                    if not isinstance(candidate_date, str) or not candidate_date.startswith(
+                        expected_date
+                    ):
+                        continue
+                    candidate_benchmark = str(candidate.get("benchmark") or "").strip()
+                    if candidate_benchmark.lower() != expected_benchmark.lower():
+                        continue
+                    candidate_years = str(candidate.get("yearsToMaturity") or "").strip()
+                    if bucket_explicit and candidate_years != expected_years:
+                        continue
+                    matching.append(candidate)
+
+                if not matching:
+                    errors.append(
+                        "No treasury candidates matched the requested trade date/benchmark."
+                    )
+
+                best_record = None
+                best_volume = None
+                if matching:
+                    best_record = max(
+                        matching,
+                        key=lambda item: _coerce_number(item.get("dealerCustomerVolume"))
+                        or float("-inf"),
+                    )
+                    best_volume = _coerce_number(best_record.get("dealerCustomerVolume"))
+                    if best_volume is None:
+                        errors.append(
+                            "No dealerCustomerVolume values found in treasury candidates."
+                        )
+
+                response_best_years = ""
+                response_best_volume = None
+                if isinstance(parsed, dict):
+                    response_best_years = str(
+                        parsed.get("best_years_to_maturity")
+                        or parsed.get("bestYearsToMaturity")
+                        or parsed.get("yearsToMaturity")
+                        or ""
+                    ).strip()
+                    response_best_volume = _coerce_number(
+                        parsed.get("best_dealer_customer_volume")
+                        or parsed.get("bestDealerCustomerVolume")
+                        or parsed.get("best_quantity")
+                        or parsed.get("dealerCustomerVolume")
+                    )
+                if not response_best_years and isinstance(record, dict):
+                    response_best_years = str(
+                        record.get("yearsToMaturity") or ""
+                    ).strip()
+                if response_best_volume is None and isinstance(record, dict):
+                    response_best_volume = _coerce_number(
+                        record.get("dealerCustomerVolume")
+                    )
+                if not response_best_years:
+                    errors.append(
+                        "Missing best_years_to_maturity for max-volume question."
+                    )
+                if response_best_volume is None:
+                    errors.append(
+                        "Missing best_dealer_customer_volume for max-volume question."
+                    )
+
+                if record is None and best_record is not None:
+                    record = best_record
+
+                if best_record is not None:
+                    expected_best_years = str(best_record.get("yearsToMaturity") or "").strip()
+                    if response_best_years and response_best_years != expected_best_years:
+                        errors.append(
+                            "Best yearsToMaturity mismatch: "
+                            f"expected '{expected_best_years}', got {response_best_years}."
+                        )
+                    if (
+                        best_volume is not None
+                        and response_best_volume is not None
+                        and abs(response_best_volume - best_volume) > 1e-6
+                    ):
+                        errors.append(
+                            "Best dealerCustomerVolume mismatch: "
+                            f"expected {best_volume}, got {response_best_volume}."
+                        )
+
+                if record is None:
+                    errors.append("Missing treasury record for the requested trade date.")
+                else:
+                    record_date = record.get("tradeDate")
+                    if not isinstance(record_date, str):
+                        errors.append("Missing tradeDate on treasury record.")
+                    else:
+                        attempts = (
+                            _extract_attempts(parsed, None) if isinstance(parsed, dict) else []
+                        )
+                        closest = (
+                            _closest_attempt_date(expected_date, attempts)
+                            if attempts
+                            else None
+                        )
+                        if closest and record_date != closest:
+                            errors.append(
+                                "Trade date is not the closest available date."
+                            )
+                        elif not record_date.startswith(expected_date) and not closest:
+                            errors.append(
+                                f"Trade date mismatch: expected {expected_date}, got {record_date}."
+                            )
+                    record_benchmark = str(record.get("benchmark") or "").strip()
+                    if record_benchmark.lower() != expected_benchmark.lower():
+                        errors.append(
+                            f"benchmark mismatch: expected '{expected_benchmark}', got {record_benchmark}."
+                        )
+                    if bucket_explicit:
+                        record_years = str(record.get("yearsToMaturity") or "").strip()
+                        if record_years != expected_years:
+                            errors.append(
+                                "yearsToMaturity mismatch: "
+                                f"expected '{expected_years}', got {record_years}."
+                            )
+
+                status = "pass" if not errors else "fail"
+                summary = (
+                    f"Treasury max dealer customer volume {status} for trade date {expected_date}."
+                )
+                await updater.add_artifact(
+                    parts=[
+                        Part(root=TextPart(text=summary)),
+                        Part(
+                            root=DataPart(
+                                data={
+                                    "status": status,
+                                    "errors": errors,
+                                    "trade_date": expected_date,
+                                    "best_years_to_maturity": response_best_years,
+                                    "best_dealer_customer_volume": response_best_volume,
+                                    "record": record,
+                                    "candidates": candidates,
+                                    "purple_response": parsed,
+                                }
+                            )
+                        ),
+                    ],
+                    name="Result",
+                )
+                return
+
             record = None
             if isinstance(parsed, dict):
                 record = parsed.get("record")
             if record is None:
-                record = _extract_treasury_record(parsed, expected_date)
+                record = _extract_treasury_record(
+                    parsed, expected_date, expected_years, expected_benchmark
+                )
             volume = None
             if isinstance(parsed, dict):
                 volume = parsed.get("dealerCustomerVolume")
@@ -603,19 +1079,34 @@ class Agent:
                 errors.append("Missing treasury record for the requested trade date.")
             else:
                 record_date = record.get("tradeDate")
-                if not isinstance(record_date, str) or not record_date.startswith(expected_date):
-                    errors.append(
-                        f"Trade date mismatch: expected {expected_date}, got {record_date}."
+                if not isinstance(record_date, str):
+                    errors.append("Missing tradeDate on treasury record.")
+                else:
+                    attempts = (
+                        _extract_attempts(parsed, None) if isinstance(parsed, dict) else []
                     )
+                    closest = (
+                        _closest_attempt_date(expected_date, attempts)
+                        if attempts
+                        else None
+                    )
+                    if closest and record_date != closest:
+                        errors.append(
+                            "Trade date is not the closest available date."
+                        )
+                    elif not record_date.startswith(expected_date) and not closest:
+                        errors.append(
+                            f"Trade date mismatch: expected {expected_date}, got {record_date}."
+                        )
                 years = str(record.get("yearsToMaturity") or "").strip()
-                if years != "<= 2 years":
+                if years != expected_years:
                     errors.append(
-                        f"yearsToMaturity mismatch: expected '<= 2 years', got {years}."
+                        f"yearsToMaturity mismatch: expected '{expected_years}', got {years}."
                     )
                 benchmark = str(record.get("benchmark") or "").strip()
-                if benchmark.lower() != "on-the-run":
+                if benchmark.lower() != expected_benchmark.lower():
                     errors.append(
-                        f"benchmark mismatch: expected 'On-the-run', got {benchmark}."
+                        f"benchmark mismatch: expected '{expected_benchmark}', got {benchmark}."
                     )
 
             if volume is None or _coerce_number(volume) is None:

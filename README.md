@@ -90,6 +90,13 @@ Dataset guidance:
 - **Fixed income treasuryDailyAggregates:** TRACE daily US Treasury volume. Select the
   matching `yearsToMaturity` bucket (e.g., `<= 2 years`, `> 5 years and <= 7 years`)
   and `benchmark` (`On-the-run` or `Off-the-run`) and return `dealerCustomerVolume`.
+  The evaluator parses maturity phrases like `<= 2 years` or `up to 7 years` into
+  these buckets:
+  - `<= 2 years`
+  - `> 2 years and <= 3 years`
+  - `> 3 years and <= 5 years`
+  - `> 5 years and <= 7 years`
+  - `> 7 years and <= 10 years`
 
 Scoring:
 - Each case is marked `pass` if no errors are found, otherwise `fail`.

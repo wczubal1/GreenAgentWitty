@@ -63,9 +63,45 @@ root. Override with `--symbols-csv` or pass `--symbols`.
 Note: the purple agent can optionally use an MCP server for FINRA lookups. If so,
 set `MCP_SERVER_COMMAND` on the purple runtime (see PurpleAgentWitty README).
 
+## Benchmark Information
+
+Purple connects to FINRA data via the API (available through the MCP server) and
+answers a set of 10 questions. The first step is deciding which dataset to use:
+`consolidatedShortInterest`, `weeklySummary`, or `treasuryDailyAggregates`.
+
+The datasets map to question types:
+- **consolidatedShortInterest:** short interest for multiple S&P 500 symbols, then
+  select the symbol with the highest short interest. If the requested date is a
+  weekend/holiday, the agent must pick the closest available date with data.
+- **weeklySummary:** weekly trading volumes for specific symbols.
+- **treasuryDailyAggregates:** US Treasury trading activity, including identifying
+  the maturity bucket (e.g., `> 5 years and <= 7 years`) with the highest activity.
+
+This results in analytical answers such as which symbol has the highest short
+interest on a given date, or which Treasury maturity bucket has the highest
+dealer customer volume on a given date.
+
+Implementation details:
+The environment exposes FINRA data through an MCP tool (or the client API). The
+goal is to answer each question by selecting the correct dataset, retrieving the
+required records, and computing the requested value (for example, the max short
+interest or dealer customer volume). The state includes the question, requested
+date, symbol list (if any), and any data retrieved so far. Purple actions include
+choosing a dataset, calling the FINRA API/MCP tool with parameters, and deciding
+whether to make additional calls (such as nearby dates) before returning a final
+JSON response. A task ends when a complete, correctly formatted response is
+returned or when the maximum allowed attempts are exhausted.
+
 ## Evaluation
 
 Each case is evaluated by the green agent and returns `pass` or `fail`.
+
+Evaluation is based on correctness and completeness. Metrics include selecting
+the correct dataset, returning all required records/fields, meeting minimum
+attempt counts, choosing the closest available date when the requested date has
+no data, and computing the correct best symbol/quantity or treasury maturity
+bucket. Treasury questions also validate benchmark matching and year-over-year
+delta calculations where required. A case passes only if all checks succeed.
 
 Checks performed per case:
 - **Dataset selection:** if `question` or `dataset_name_eval` is provided, the purple
@@ -83,6 +119,13 @@ Checks performed per case:
   computed from the valid attempts.
 
 Example failure reasons:
+We designed test cases to trigger common failure modes and confirmed green flags
+them. Example: if a weekly-summary question is answered with
+`consolidatedShortInterest`, green fails with a dataset-mismatch error. If the
+purple agent returns a non-closest trade date (e.g., using `2024-01-27` instead
+of `2024-01-26`), green fails the closest-date check. If required fields like
+`totalWeeklyShareQuantity` or `dealerCustomerVolume` are missing, green fails
+the case.
 - **Dataset mismatch:** weekly question answered with `consolidatedShortInterest`
   instead of `weeklySummary`, so evaluation fails with a dataset mismatch.
 - **Treasury record missing:** no matching `treasuryDailyAggregates` record found
@@ -93,7 +136,22 @@ Example failure reasons:
   reports a non-closest date (e.g., 2024-01-27 when data exists for 2024-01-26),
   the case fails.
 
+Example trajectories:
+- **Correct dataset + closest date + correct max:** passes.
+- **Wrong dataset:** fails with a dataset mismatch.
+- **Closest date not used:** fails the closest-date check.
+- **Treasury delta mismatch:** fails if `previous_trade_date` is not the closest
+  available date.
+- **Missing required fields:** fails if `totalWeeklyShareQuantity` or
+  `dealerCustomerVolume` is missing where required.
+
 Dataset guidance:
+The benchmark data and test cases span three FINRA datasets via the MCP server,
+covering short-interest ranking across randomly sampled S&P 500 symbols (3/5/10),
+weekly share volume comparisons, and fixed-income treasury maturity questions
+including max volume and year-over-year deltas. These cases are designed to
+exercise dataset selection, closest-date handling, required fields, and max/summary
+computations in the green evaluation.
 - **Equity consolidatedShortInterest:** OTC short interest submissions across exchanges.
   Use `currentShortPositionQuantity` (current cycle) and settlement dates.
 - **Equity weeklySummary:** weekly OTC aggregate trade data with `totalWeeklyShareQuantity`

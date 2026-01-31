@@ -82,6 +82,17 @@ Checks performed per case:
 - **Best symbol/quantity:** the reported best symbol/quantity must match the max
   computed from the valid attempts.
 
+Example failure reasons:
+- **Dataset mismatch:** weekly question answered with `consolidatedShortInterest`
+  instead of `weeklySummary`, so evaluation fails with a dataset mismatch.
+- **Treasury record missing:** no matching `treasuryDailyAggregates` record found
+  for the requested trade date (or closest available date), so the required
+  `dealerCustomerVolume` and record are missing.
+- **Delta date not closest:** for year-over-year treasury deltas, the `previous_trade_date`
+  must be the closest available date to the requested prior year; if the response
+  reports a non-closest date (e.g., 2024-01-27 when data exists for 2024-01-26),
+  the case fails.
+
 Dataset guidance:
 - **Equity consolidatedShortInterest:** OTC short interest submissions across exchanges.
   Use `currentShortPositionQuantity` (current cycle) and settlement dates.
